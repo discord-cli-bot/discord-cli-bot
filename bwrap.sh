@@ -27,4 +27,4 @@ exec env -i TERM=linux COLUMNS=80 LINES=24 HOME="$HOME" \
     --hostname osaibot \
     --die-with-parent \
     --as-pid-1 \
-    bash -l
+    ~/osai-bot/bash/bash -l

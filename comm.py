@@ -207,7 +207,7 @@ async def writeall(fd, data):
         else:
             pos = start
 
-    loop._add_writer(fd, writer_cb)
+    loop.add_writer(fd, writer_cb)
     fut.add_done_callback(lambda fut: loop.remove_writer(fd))
     return await fut
 
@@ -532,10 +532,19 @@ class Comm():
                     await self.handle_cmd(cmd, payload)
 
     async def on_botmsg(self):
+        write_locks = {
+            'cmd': asyncio.Lock(),
+            'ptm': asyncio.Lock(),
+        }
+
         def make_write_task(typ, coroutine):
             async def inner():
                 try:
-                    await coroutine
+                    # Without lock, if a second task attempt to write
+                    # the first is blocked waiting for poll, the second
+                    # will cancel the first (in loop.add_writer).
+                    async with write_locks['typ']:
+                        await coroutine
                 except asyncio.CancelledError:
                     pass
                 except BaseException as e:
