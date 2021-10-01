@@ -33,7 +33,7 @@ def recv_fd(sock):
 
 def read_one_pkt(sock):
     # Normally I'd write C, but Python's recv seems to resize the buffer to
-    # the Nnumber returned by the recv syscall (if number passed into recv is
+    # the number returned by the recv syscall (if number passed into recv is
     # positive), so... cool
     buf = sock.recv(1, socket.MSG_PEEK | socket.MSG_TRUNC)
     if not buf:
@@ -225,6 +225,7 @@ class Comm():
             'cmd': set(),
             'ptm': set(),
         }
+        self.next_cmd_ptm = set()
 
     @staticmethod
     def raise_restart(*args):
@@ -459,7 +460,7 @@ class Comm():
 
         self.last_ptm_handle = time.monotonic()
         self.has_flush_wait = False
-        next_tasks = {gen_ptm_task(), gen_cmd_task()}
+        self.next_cmd_ptm = {gen_ptm_task(), gen_cmd_task()}
 
         while True:
             if self.has_flush_wait:
@@ -470,8 +471,8 @@ class Comm():
             else:
                 timeout = None
 
-            done, next_tasks = await asyncio.wait(
-                next_tasks, timeout=timeout,
+            done, self.next_cmd_ptm = await asyncio.wait(
+                self.next_cmd_ptm, timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED)
 
             if not done:
@@ -479,12 +480,12 @@ class Comm():
                 await self.handle_ptm(b'', FlushType.HIT_TIMER)
                 continue
 
-            if next_tasks:
+            if self.next_cmd_ptm:
                 # Try to get more resolved, else if one task is already
                 # resolved (due to race tiebreaker), asyncio.wait will
                 # immediately return
-                done_2nd, next_tasks = await asyncio.wait(
-                    next_tasks, timeout=0,
+                done_2nd, self.next_cmd_ptm = await asyncio.wait(
+                    self.next_cmd_ptm, timeout=0,
                     return_when=asyncio.FIRST_COMPLETED)
                 done |= done_2nd
 
@@ -512,7 +513,7 @@ class Comm():
 
                 drop_task = done_dict[drop]
                 done.remove(drop_task)
-                next_tasks.add(drop_task)
+                self.next_cmd_ptm.add(drop_task)
 
             for task in done:
                 src, data = await task
@@ -520,13 +521,13 @@ class Comm():
                     if not data:
                         raise RestartException
 
-                    next_tasks.add(gen_ptm_task())
+                    self.next_cmd_ptm.add(gen_ptm_task())
 
                     await self.handle_ptm(data, FlushType.IF_NECESSARY)
                 elif src == 'cmd':
                     cmd, payload = data
 
-                    next_tasks.add(gen_cmd_task())
+                    self.next_cmd_ptm.add(gen_cmd_task())
 
                     await self.handle_cmd(cmd, payload)
 
@@ -617,7 +618,7 @@ class Comm():
                 if not task.done():
                     task.cancel()
 
-            for task in tasks:
+            for task in tasks | self.next_cmd_ptm:
                 if not task.done():
                     task.cancel()
 
