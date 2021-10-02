@@ -221,10 +221,8 @@ class Comm():
         self.killer = self.loop.create_future()
         self.rate_limit = make_rate_limiter(1.2)
 
-        self.ongoing_writes = {
-            'cmd': set(),
-            'ptm': set(),
-        }
+        self.exec_drain = set()
+        self.write_tasks = set()
         self.next_cmd_ptm = set()
 
     @staticmethod
@@ -399,7 +397,7 @@ class Comm():
             self.term_state = TermState.IN_PROMPT
 
             # Kill all pending PTM inputs
-            for task in self.ongoing_writes['ptm']:
+            for task in self.exec_drain:
                 if not task.done():
                     task.cancel()
 
@@ -532,18 +530,16 @@ class Comm():
                     await self.handle_cmd(cmd, payload)
 
     async def on_botmsg(self):
-        write_locks = {
-            'cmd': asyncio.Lock(),
-            'ptm': asyncio.Lock(),
-        }
+        cmd_lock = asyncio.Lock()
+        ptm_lock = asyncio.Lock()
 
-        def make_write_task(typ, coroutine):
+        def make_write_task(lock, exec_drain, coroutine):
             async def inner():
                 try:
                     # Without lock, if a second task attempt to write
                     # the first is blocked waiting for poll, the second
                     # will cancel the first (in loop.add_writer).
-                    async with write_locks['typ']:
+                    async with lock:
                         await coroutine
                 except asyncio.CancelledError:
                     pass
@@ -551,9 +547,16 @@ class Comm():
                     self.killer.set_exception(e)
 
             task = asyncio.create_task(coroutine)
-            self.ongoing_writes[typ].add(task)
-            task.add_done_callback(
-                lambda arg: self.ongoing_writes[typ].discard(task))
+            self.write_tasks.add(task)
+            if exec_drain:
+                self.exec_drain.add(task)
+
+            def done_cb(arg):
+                self.write_tasks.discard(task)
+                if exec_drain:
+                    self.exec_drain.discard(task)
+
+            task.add_done_callback(done_cb)
 
         while True:
             data = (await self.bot_reader.readline()).strip()
@@ -568,14 +571,28 @@ class Comm():
                     payload = (struct.pack('=b', osaibot_command.CMD_INPUT)
                                + payload.encode())
                     make_write_task(
-                        'cmd', self.loop.sock_sendall(self.cmdsock, payload))
+                        cmd_lock, False,
+                        self.loop.sock_sendall(self.cmdsock, payload))
                 elif self.term_state in [
                     TermState.IN_EXEC_DIRECT,
                     TermState.IN_EXEC_TERMEMU,
                 ]:
                     # For some reason, Enter is CR not NL
                     payload = payload.replace('\n', '\r').encode()
-                    make_write_task('ptm', writeall(self.ptm_fd, payload))
+                    make_write_task(
+                        ptm_lock, True,
+                        writeall(self.ptm_fd, payload))
+            elif data['type'] == 'SIGNAL':
+                if self.term_state in [
+                    TermState.IN_EXEC_DIRECT,
+                    TermState.IN_EXEC_TERMEMU,
+                ]:
+                    signum = data['signum']
+                    payload = struct.pack(
+                        '=bi', osaibot_command.CMD_SIGNAL, signum)
+                    make_write_task(
+                        cmd_lock, True,
+                        self.loop.sock_sendall(self.cmdsock, payload))
             else:
                 raise AssertionError
 
@@ -620,10 +637,7 @@ class Comm():
         finally:
             # This is not awaited. The callback mechanism from
             # make_write_task will handle it.
-            for task in self.ongoing_writes['ptm']:
-                if not task.done():
-                    task.cancel()
-            for task in self.ongoing_writes['cmd']:
+            for task in self.write_tasks:
                 if not task.done():
                     task.cancel()
 
