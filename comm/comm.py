@@ -17,7 +17,7 @@ import traceback
 import pyte
 
 
-CMD_UNIX_PATH = '/tmp/socket'
+CMD_UNIX_PATH = '/jailroot/osaibot-sock'
 BOT_TCP_ADDR = '0.0.0.0', 49813
 
 
@@ -608,7 +608,7 @@ class Comm():
 
         bwrap_pid, self.ptm_fd = pty.fork()
         if not bwrap_pid:
-            os.execlp('./bwrap.sh', './bwrap.sh')
+            os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
             os._exit(1)
 
         # Set PTM non-blocking
