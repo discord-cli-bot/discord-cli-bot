@@ -53,6 +53,10 @@ class RestartException(Exception):
     pass
 
 
+class BotClosedException(Exception):
+    pass
+
+
 @enum.unique
 class osaibot_command(enum.IntEnum):
     CMD_INPUT = 1
@@ -590,7 +594,7 @@ class Comm():
         while True:
             data = (await self.bot_reader.readline()).strip()
             if not data:
-                raise RestartException
+                raise BotClosedException
 
             data = json.loads(data)
 
@@ -690,7 +694,7 @@ class Comm():
             tasks.add(asyncio.create_task(self.on_botmsg()))
 
             await asyncio.gather(*tasks)
-        except Exception:
+        except RestartException:
             pass
         finally:
             # This is not awaited. The callback mechanism from
@@ -746,11 +750,12 @@ async def main():
         f.write('0 65535')
 
     async def handle_connection(reader, writer):
-        comm = Comm(reader, writer)
-
         try:
             while True:
+                comm = Comm(reader, writer)
                 await comm.run()
+        except BotClosedException:
+            pass
         finally:
             writer.close()
 

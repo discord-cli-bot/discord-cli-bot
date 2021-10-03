@@ -15,10 +15,6 @@ class Test(unittest.IsolatedAsyncioTestCase):
         self.writer.close()
         await self.writer.wait_closed()
 
-        # FIXME: Need to debug why, if this is not here connections
-        # often close prematurely
-        await asyncio.sleep(0.5)
-
     async def send(self, message):
         self.writer.write(json.dumps(message).encode() + b'\n')
         await self.writer.drain()
@@ -276,6 +272,16 @@ class Test(unittest.IsolatedAsyncioTestCase):
         await self.send({"type": "INPUT", "payload": "hello world\n"})
         await self.assertResp({"type": "DIRECT",
                                "payload": "hello world\nhello world\n"})
+
+    async def test_conn_restart(self):
+        await self.send({"type": "INPUT", "payload": "exit\n"})
+        await self.assert_simple_prompt()
+        await self.send({"type": "INPUT", "payload": "exec false\n"})
+        await self.assert_simple_prompt()
+        await self.send({"type": "INPUT", "payload": "exec true\n"})
+        await self.assert_simple_prompt()
+        await self.send({"type": "INPUT", "payload": "exec sleep infinity\n"})
+        await self.assert_simple_prompt()
 
 
 if __name__ == "__main__":
