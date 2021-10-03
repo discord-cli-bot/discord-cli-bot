@@ -20,13 +20,20 @@ import pyte
 CMD_UNIX_PATH = '/jailroot/osaibot-sock'
 BOT_TCP_ADDR = '0.0.0.0', 49813
 
+THIS_PID = os.getpid()
+
 
 def recv_fd(sock):
     msg, ancdata, flags, addr = sock.recvmsg(
         1, socket.CMSG_LEN(struct.calcsize('=i')))
     for cmsg_level, cmsg_type, cmsg_data in ancdata:
         if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
-            return struct.unpack('=i', cmsg_data)[0]
+            fd = struct.unpack('=i', cmsg_data)[0]
+
+            flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+            fcntl.fcntl(fd, fcntl.F_SETFD, flags | os.O_CLOEXEC)
+
+            return fd
 
     raise RuntimeError('no fd received')
 
@@ -247,8 +254,8 @@ class Comm():
     def raise_restart(*args):
         raise RestartException
 
-    async def on_exit_kill(self):
-        await reader_wait_cb(self.bwrap_pidfd, self.raise_restart)
+    async def on_exit_kill(self, pidfd):
+        await reader_wait_cb(pidfd, self.raise_restart)
 
     async def init_conn(self):
         self.cmdsock, addr = await self.loop.sock_accept(self.cmdmainsock)
@@ -259,6 +266,10 @@ class Comm():
             os.unlink(CMD_UNIX_PATH)
 
         self.bash_pidfd = await reader_wait_cb(
+            self.cmdsock.fileno(),
+            lambda fd: recv_fd(self.cmdsock))
+
+        self.netnsfd = await reader_wait_cb(
             self.cmdsock.fileno(),
             lambda fd: recv_fd(self.cmdsock))
 
@@ -634,6 +645,9 @@ class Comm():
             flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFL)
             fcntl.fcntl(self.ptm_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
+            flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFD)
+            fcntl.fcntl(self.ptm_fd, fcntl.F_SETFD, flags | os.O_CLOEXEC)
+
             self.bwrap_pidfd = os.pidfd_open(bwrap_pid, 0)
 
         tasks = {self.killer}
@@ -641,14 +655,36 @@ class Comm():
         self.term_state = TermState.BAD
         self.cmdsock = None
         self.bash_pidfd = None
+        self.netnsfd = None
+        self.slirp4netns_pidfd = None
 
         try:
-            tasks.add(asyncio.create_task(self.on_exit_kill()))
+            tasks.add(asyncio.create_task(
+                self.on_exit_kill(self.bwrap_pidfd)))
 
             await asyncio.wait_for(self.init_conn(), 1)
 
-            tasks.add(asyncio.create_task(self.on_cmd_ptm()))
+            async with reaper_lock:
+                # Normally slirp4netns takes a PID, but we don't have it.
+                # We have the wrapper's PID, but it's outside the ns.
+                # We also have PIDFDs, but IDK a way to translate them to PIDs.
+                # Only way I know to to look at process tree :(
+                slirp4netns_pid = os.spawnlp(
+                    os.P_NOWAIT, 'slirp4netns',
+                    'slirp4netns',
+                    '--configure',
+                    '--mtu=65520',
+                    '--disable-host-loopback',
+                    '--netns-type=path',
+                    f'/proc/{THIS_PID}/fd/{self.netnsfd}',
+                    'tap0')
 
+                self.slirp4netns_pidfd = os.pidfd_open(slirp4netns_pid)
+
+            tasks.add(asyncio.create_task(
+                self.on_exit_kill(self.slirp4netns_pidfd)))
+
+            tasks.add(asyncio.create_task(self.on_cmd_ptm()))
             tasks.add(asyncio.create_task(self.on_botmsg()))
 
             await asyncio.gather(*tasks)
@@ -682,6 +718,14 @@ class Comm():
                     signal.pidfd_send_signal(
                         self.bash_pidfd, signal.SIGKILL, None, 0)
                 os.close(self.bash_pidfd)
+            if self.slirp4netns_pidfd is not None:
+                with contextlib.suppress(OSError):
+                    signal.pidfd_send_signal(
+                        self.slirp4netns_pidfd, signal.SIGTERM, None, 0)
+                os.close(self.slirp4netns_pidfd)
+
+            if self.netnsfd is not None:
+                os.close(self.netnsfd)
 
             if self.cmdsock is not None:
                 self.cmdsock.close()
@@ -695,6 +739,9 @@ class Comm():
 async def main():
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGCHLD, sigchld_handler)
+
+    with open('/proc/sys/net/ipv4/ping_group_range', 'w') as f:
+        f.write('0 65535')
 
     async def handle_connection(reader, writer):
         comm = Comm(reader, writer)

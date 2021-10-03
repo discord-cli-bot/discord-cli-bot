@@ -8,7 +8,8 @@ RUN apt-get update && \
     apt-get install -y build-essential autoconf bison flex \
                        git libtool pkg-config \
                        htop strace lsof man-db \
-                       vim nano emacs
+                       vim nano emacs \
+                       iputils-ping iproute2
 
 FROM ubuntu:20.04 as ubuntu-build
 
@@ -32,7 +33,7 @@ FROM ubuntu:20.04 as comm
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y libprotobuf-dev libnl-route-3-dev && \
+    apt-get install -y libprotobuf-dev libnl-route-3-dev slirp4netns && \
     apt-get install -y software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt-get install -y python3.9 python3.9-venv
