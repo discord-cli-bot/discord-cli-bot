@@ -675,6 +675,8 @@ class Comm():
                     '--configure',
                     '--mtu=65520',
                     '--disable-host-loopback',
+                    '--enable-sandbox',
+                    '--enable-seccomp',
                     '--netns-type=path',
                     f'/proc/{THIS_PID}/fd/{self.netnsfd}',
                     'tap0')
