@@ -212,6 +212,24 @@ async def writeall(fd, data):
     return await fut
 
 
+reaper_lock = asyncio.Lock()
+
+
+def sigchld_handler():
+    async def _inner():
+        async with reaper_lock:
+            while True:
+                try:
+                    pid, status = os.waitpid(-1, os.WNOHANG)
+                except OSError:
+                    break
+
+                if not pid:
+                    break
+
+    asyncio.create_task(_inner())
+
+
 class Comm():
     def __init__(self, reader, writer):
         self.bot_reader = reader
@@ -606,16 +624,18 @@ class Comm():
         self.cmdmainsock.bind(CMD_UNIX_PATH)
         self.cmdmainsock.listen(1)
 
-        bwrap_pid, self.ptm_fd = pty.fork()
-        if not bwrap_pid:
-            os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
-            os._exit(1)
+        async with reaper_lock:
+            bwrap_pid, self.ptm_fd = pty.fork()
+            if not bwrap_pid:
+                os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
+                os._exit(1)
 
-        # Set PTM non-blocking
-        flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFL)
-        fcntl.fcntl(self.ptm_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            # Set PTM non-blocking
+            flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.ptm_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        self.bwrap_pidfd = os.pidfd_open(bwrap_pid, 0)
+            self.bwrap_pidfd = os.pidfd_open(bwrap_pid, 0)
+
         tasks = {self.killer}
 
         self.term_state = TermState.BAD
@@ -669,11 +689,13 @@ class Comm():
             if self.cmdmainsock is not None:
                 self.cmdmainsock.close()
 
-            os.waitid(os.P_PID, bwrap_pid, os.WEXITED)
             os.close(self.ptm_fd)
 
 
 async def main():
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGCHLD, sigchld_handler)
+
     async def handle_connection(reader, writer):
         comm = Comm(reader, writer)
 
