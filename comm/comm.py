@@ -223,6 +223,10 @@ async def writeall(fd, data):
     return await fut
 
 
+# If something other than sigchld_handler is holding this lock, PIDs of
+# children are okay to be accessed directly and won't vanish into thin air.
+# If you start a child process and get a PID out of it, hold this lock to
+# convert it into a PIDFD, where we have full control over their lifetime.
 reaper_lock = asyncio.Lock()
 
 
