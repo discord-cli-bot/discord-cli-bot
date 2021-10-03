@@ -296,10 +296,12 @@ class Comm():
 
             if self.term_state == TermState.IN_EXEC_DIRECT:
                 # Figure out if we should switch to IN_EXEC_TERMEMU
-                # We end this part at a backspace character, or
+                # We end this part at a erase character, or
                 # an ANSI escape code that isn't SGR.
                 should_switch = False
-                if b'\b' in data:
+
+                # Erase character, either ^H or ^?
+                if b'\b' in data or 'b\x7f' in data:
                     should_switch = True
 
                 if not should_switch:
