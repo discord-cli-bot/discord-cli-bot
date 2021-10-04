@@ -20,7 +20,7 @@ RUN apt-get update && \
                        git libtool pkg-config
 
 COPY bash /bash
-RUN cd /bash && ./configure && make -j$(nproc)
+RUN cd /bash && ./configure --enable-static-link && make -j$(nproc)
 
 RUN apt-get install -y libprotobuf-dev protobuf-compiler \
                        libnl-route-3-dev
