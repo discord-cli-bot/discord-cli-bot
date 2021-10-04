@@ -17,10 +17,21 @@ import traceback
 import pyte
 
 
-CMD_UNIX_PATH = '/jailroot/osaibot-sock'
 BOT_TCP_ADDR = '0.0.0.0', 49813
 
 THIS_PID = os.getpid()
+
+
+def set_cloexec(*fds):
+    for fd in fds:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+
+
+def unset_cloexec(*fds):
+    for fd in fds:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        fcntl.fcntl(fd, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
 
 
 def recv_fd(sock):
@@ -29,10 +40,7 @@ def recv_fd(sock):
     for cmsg_level, cmsg_type, cmsg_data in ancdata:
         if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
             fd = struct.unpack('=i', cmsg_data)[0]
-
-            flags = fcntl.fcntl(fd, fcntl.F_GETFD)
-            fcntl.fcntl(fd, fcntl.F_SETFD, flags | os.O_CLOEXEC)
-
+            set_cloexec(fd)
             return fd
 
     raise RuntimeError('no fd received')
@@ -266,13 +274,6 @@ class Comm():
         await reader_wait_cb(pidfd, self.raise_restart)
 
     async def init_conn(self):
-        self.cmdsock, addr = await self.loop.sock_accept(self.cmdmainsock)
-
-        self.cmdmainsock.close()
-        self.cmdmainsock = None
-        with contextlib.suppress(OSError):
-            os.unlink(CMD_UNIX_PATH)
-
         self.bash_pidfd = await reader_wait_cb(
             self.cmdsock.fileno(),
             lambda fd: recv_fd(self.cmdsock))
@@ -305,7 +306,7 @@ class Comm():
                 should_switch = False
 
                 # Erase character, either ^H or ^?
-                if b'\b' in data or 'b\x7f' in data:
+                if b'\b' in data or b'\x7f' in data:
                     should_switch = True
 
                 if not should_switch:
@@ -456,7 +457,7 @@ class Comm():
                 b'', prompt)
 
             # If still unsupported stuffs left, delete them
-            prompt.translate(None, b'\x1B\r\b')
+            prompt.translate(None, b'\x1b\r\b\x7f')
 
             await self.bot_response({
                 'type': 'PROMPT',
@@ -636,34 +637,54 @@ class Comm():
                 raise AssertionError
 
     async def run(self):
-        self.cmdmainsock = socket.socket(
-            socket.AF_UNIX,
-            socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK,
-            0)
-        with contextlib.suppress(OSError):
-            os.unlink(CMD_UNIX_PATH)
-        self.cmdmainsock.bind(CMD_UNIX_PATH)
-        self.cmdmainsock.listen(1)
+        cmdsockjail = None
+        exe_fd = None
 
-        async with reaper_lock:
-            bwrap_pid, self.ptm_fd = pty.fork()
-            if not bwrap_pid:
-                os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
-                os._exit(1)
+        try:
+            exe_fd = os.memfd_create('osaibot-bash')
 
-            # Set PTM non-blocking
-            flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFL)
-            fcntl.fcntl(self.ptm_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            with open('/home/user/bash') as exe_base:
+                exe_base.seek(0, os.SEEK_END)
+                exe_size = exe_base.tell()
+                offset = 0
 
-            flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFD)
-            fcntl.fcntl(self.ptm_fd, fcntl.F_SETFD, flags | os.O_CLOEXEC)
+                while offset < exe_size:
+                    offset += os.sendfile(exe_fd, exe_base.fileno(),
+                                          offset, exe_size - offset)
 
-            self.bwrap_pidfd = os.pidfd_open(bwrap_pid, 0)
+            self.cmdsock, cmdsockjail = socket.socketpair(
+                socket.AF_UNIX,
+                socket.SOCK_SEQPACKET | socket.SOCK_NONBLOCK,
+                0)
+
+            async with reaper_lock:
+                bwrap_pid, self.ptm_fd = pty.fork()
+
+                if not bwrap_pid:
+                    unset_cloexec(cmdsockjail.fileno(), exe_fd)
+                    os.environ['SOCK_FD'] = str(cmdsockjail.fileno())
+                    os.environ['EXE_FD'] = str(exe_fd)
+
+                    os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
+                    os._exit(1)
+
+                # Set PTM non-blocking
+                flags = fcntl.fcntl(self.ptm_fd, fcntl.F_GETFL)
+                fcntl.fcntl(self.ptm_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+                set_cloexec(self.ptm_fd)
+
+                self.bwrap_pidfd = os.pidfd_open(bwrap_pid, 0)
+        finally:
+            if cmdsockjail is not None:
+                cmdsockjail.close()
+
+            if exe_fd is not None:
+                os.close(exe_fd)
 
         tasks = {self.killer}
 
         self.term_state = TermState.BAD
-        self.cmdsock = None
         self.bash_pidfd = None
         self.netnsfd = None
         self.slirp4netns_pidfd = None
@@ -741,9 +762,6 @@ class Comm():
 
             if self.cmdsock is not None:
                 self.cmdsock.close()
-
-            if self.cmdmainsock is not None:
-                self.cmdmainsock.close()
 
             os.close(self.ptm_fd)
 

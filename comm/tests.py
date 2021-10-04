@@ -83,8 +83,8 @@ class Test(unittest.IsolatedAsyncioTestCase):
     async def test_no_color(self):
         await self.send({"type": "INPUT", "payload": "ls --color\n"})
         await self.assertResp({"type": "DIRECT", "payload":
-            "bin   dev  home  lib32  libx32  mnt  osaibot-bash  root  sbin  sys  usr\n"
-            "boot  etc  lib   lib64  media   opt  proc          run   srv   tmp  var\n"})
+            "bin   dev  home  lib32  libx32  mnt  proc  run   srv  tmp  var\n"
+            "boot  etc  lib   lib64  media   opt  root  sbin  sys  usr\n"})
         await self.assert_simple_prompt()
 
     async def test_render_screen(self):
