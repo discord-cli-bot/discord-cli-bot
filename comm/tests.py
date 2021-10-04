@@ -283,6 +283,14 @@ class Test(unittest.IsolatedAsyncioTestCase):
         await self.send({"type": "INPUT", "payload": "exec sleep infinity\n"})
         await self.assert_simple_prompt()
 
+    async def test_no_env_pollution(self):
+        await self.send({"type": "INPUT", "payload": "echo $SOCK_FD\n"})
+        await self.assertResp({"type": "DIRECT", "payload": "\n"})
+        await self.assert_simple_prompt()
+        await self.send({"type": "INPUT", "payload": "echo $EXE_FD\n"})
+        await self.assertResp({"type": "DIRECT", "payload": "\n"})
+        await self.assert_simple_prompt()
+
 
 if __name__ == "__main__":
     unittest.main()
