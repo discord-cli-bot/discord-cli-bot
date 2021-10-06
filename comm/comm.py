@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import base64
 import contextlib
 import enum
+import errno
 import fcntl
 import itertools
 import json
@@ -10,16 +12,128 @@ import pty
 import re
 import signal
 import socket
+import stat
 import struct
+import threading
 import time
 import traceback
+import uuid
 
+import fuse
 import pyte
 
-
+DISCORD_UPLOAD_MOUNT = '/run/discord-upload-fuse'
 BOT_TCP_ADDR = '0.0.0.0', 49813
 
 THIS_PID = os.getpid()
+
+fuse.fuse_python_api = (0, 2)
+
+discord_upload_callbacks_lock = threading.Lock()
+discord_upload_callbacks = {}
+
+
+def path_to_uuid(path):
+    if not path or path[0] != '/':
+        return None
+    path = path[1:]
+    if '/' in path:
+        return None
+    return path
+
+
+class Stat(fuse.Stat):
+    def __init__(self):
+        self.st_mode = 0
+        self.st_ino = 0
+        self.st_dev = 0
+        self.st_nlink = 0
+        self.st_uid = 0
+        self.st_gid = 0
+        self.st_size = 0
+        self.st_atime = 0
+        self.st_mtime = 0
+        self.st_ctime = 0
+
+
+class DiscordUploaderFile:
+    def __new__(cls, path, flags):
+        with discord_upload_callbacks_lock:
+            if path_to_uuid(path) not in discord_upload_callbacks:
+                return -errno.ENOENT
+        accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+        if (flags & accmode) != os.O_WRONLY:
+            return -errno.EACCES
+
+        return super().__new__(cls)
+
+    def __init__(self, path, flags):
+        self.uuid = path_to_uuid(path)
+        self.iolock = threading.Lock()
+        self.data = b''
+        self.efbig_hit = False
+
+    def read(self, size, offset):
+        return -errno.EPERM
+
+    def write(self, buf, offset):
+        with discord_upload_callbacks_lock:
+            if self.uuid not in discord_upload_callbacks:
+                return -errno.EIO
+
+        with self.iolock:
+            if offset != len(self.data):
+                return -errno.EINVAL
+
+            # Limit 8MiB Upload
+            if len(self.data) + len(buf) > (8 << 20):
+                self.efbig_hit = True
+                return -errno.EFBIG
+
+            self.data += buf
+            return len(buf)
+
+    def release(self, flags):
+        if self.data and not self.efbig_hit:
+            with discord_upload_callbacks_lock:
+                if self.uuid in discord_upload_callbacks:
+                    discord_upload_callbacks[self.uuid](self.data)
+
+
+class DiscordUploaderFS(fuse.Fuse):
+    def _valid_path(self, path):
+        with discord_upload_callbacks_lock:
+            return path_to_uuid(path) in discord_upload_callbacks
+
+    def getattr(self, path):
+        st = Stat()
+        if path == '/':
+            st.st_mode = stat.S_IFDIR | 0o755
+            st.st_nlink = 2
+        elif self._valid_path(path):
+            st.st_mode = stat.S_IFREG | 0o222
+            st.st_nlink = 1
+            st.st_size = 0
+        else:
+            return -errno.ENOENT
+        return st
+
+    def readdir(self, path, offset):
+        for r in ('.', '..'):
+            yield fuse.Direntry(r)
+
+    def truncate(self, path, size):
+        if not self._valid_path(path):
+            return -errno.ENOENT
+
+        if size:
+            return -errno.EINVAL
+
+        return 0
+
+    def main(self, *args, **kwrgs):
+        self.file_class = DiscordUploaderFile
+        return super().main(*args, **kwrgs)
 
 
 def set_cloexec(*fds):
@@ -255,12 +369,14 @@ def sigchld_handler():
 
 class Comm():
     def __init__(self, reader, writer):
+        self.uuid = uuid.uuid4()
         self.bot_reader = reader
         self.bot_writer = writer
 
         self.loop = asyncio.get_running_loop()
         self.killer = self.loop.create_future()
         self.rate_limit = make_rate_limiter(1.2)
+        self.bot_response_lock = asyncio.Lock()
 
         self.exec_drain = set()
         self.write_tasks = set()
@@ -283,10 +399,11 @@ class Comm():
             lambda fd: recv_fd(self.cmdsock))
 
     async def bot_response(self, data):
-        await self.rate_limit()
+        async with self.bot_response_lock:
+            await self.rate_limit()
 
-        self.bot_writer.write(json.dumps(data).encode() + b'\n')
-        await self.bot_writer.drain()
+            self.bot_writer.write(json.dumps(data).encode() + b'\n')
+            await self.bot_writer.drain()
 
     async def handle_ptm(self, data, flushtype):
         data = data.replace(b'\x00', b'')
@@ -586,7 +703,7 @@ class Comm():
                 except BaseException as e:
                     self.killer.set_exception(e)
 
-            task = asyncio.create_task(coroutine)
+            task = asyncio.create_task(inner())
             self.write_tasks.add(task)
             if exec_drain:
                 self.exec_drain.add(task)
@@ -636,7 +753,38 @@ class Comm():
             else:
                 raise AssertionError
 
+    def upload_cb(self, data):
+        async def _upload_cb_inner():
+            try:
+                await self.bot_response({
+                    'type': 'UPLOAD',
+                    'payload': base64.b64encode(data).decode(),
+                })
+            except asyncio.CancelledError:
+                pass
+            except BaseException as e:
+                self.killer.set_exception(e)
+
+        def _upload_cb():
+            task = asyncio.create_task(_upload_cb_inner())
+            self.write_tasks.add(task)
+
+            def done_cb(arg):
+                self.write_tasks.discard(task)
+
+            task.add_done_callback(done_cb)
+
+        self.loop.call_soon_threadsafe(_upload_cb)
+
     async def run(self):
+        discord_upload_callbacks[str(self.uuid)] = self.upload_cb
+
+        try:
+            await self._run()
+        finally:
+            del discord_upload_callbacks[str(self.uuid)]
+
+    async def _run(self):
         cmdsockjail = None
         exe_fd = None
 
@@ -664,6 +812,7 @@ class Comm():
                     unset_cloexec(cmdsockjail.fileno(), exe_fd)
                     os.environ['SOCK_FD'] = str(cmdsockjail.fileno())
                     os.environ['EXE_FD'] = str(exe_fd)
+                    os.environ['DISCORD_UPLOAD_UUID'] = str(self.uuid)
 
                     os.execlp('/home/user/jail.sh', '/home/user/jail.sh')
                     os._exit(1)
@@ -772,6 +921,22 @@ async def main():
 
     with open('/proc/sys/net/ipv4/ping_group_range', 'w') as f:
         f.write('0 65535')
+
+    def fuse_thread():
+        fuse_server = DiscordUploaderFS(
+            version='%prog ' + fuse.__version__,
+            usage=fuse.Fuse.fusage,
+            dash_s_do='setsingle')
+
+        fuse_server.parse([
+            '-f',
+            '-o', 'allow_other',
+            '-o', 'fsname=discord',
+            '-o', 'subtype=osaibot',
+            DISCORD_UPLOAD_MOUNT], errex=1)
+        fuse_server.main()
+
+    threading.Thread(target=fuse_thread, daemon=True).start()
 
     async def handle_connection(reader, writer):
         try:

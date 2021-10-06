@@ -11,6 +11,8 @@ RUN apt-get update && \
                        vim nano emacs \
                        iputils-ping iproute2
 
+RUN touch /dev/discord
+
 FROM ubuntu:20.04 as ubuntu-build
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -28,8 +30,8 @@ RUN apt-get install -y libprotobuf-dev protobuf-compiler \
 RUN git clone https://github.com/google/nsjail.git /nsjail -b 3.0 --depth 1
 RUN cd /nsjail && make -j$(nproc)
 
-COPY nsjail-close-fds.c /
-RUN gcc -shared -o nsjail-close-fds.so nsjail-close-fds.c -ldl
+COPY nsjail-hooks.c /
+RUN gcc -shared -o nsjail-hooks.so nsjail-hooks.c -ldl
 
 FROM ubuntu:20.04 as comm
 
@@ -44,12 +46,14 @@ RUN apt-get update && \
 RUN mkdir /home/user/
 
 RUN python3.9 -m venv /home/user/venv
-RUN /home/user/venv/bin/pip install pyte
+RUN /home/user/venv/bin/pip install pyte fuse-python
+
+RUN mkdir /run/discord-upload-fuse
 
 COPY --from=jail-root / /jailroot
 COPY --from=ubuntu-build /bash/bash /home/user/
 COPY --from=ubuntu-build /nsjail/nsjail /home/user/
-COPY --from=ubuntu-build /nsjail-close-fds.so /home/user/
+COPY --from=ubuntu-build /nsjail-hooks.so /home/user/
 
 COPY nsjail.cfg comm.py jail.sh /home/user/
 
