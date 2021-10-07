@@ -44,6 +44,8 @@ def path_to_uuid(path):
 
 class Stat(fuse.Stat):
     def __init__(self):
+        now = time.time()
+
         self.st_mode = 0
         self.st_ino = 0
         self.st_dev = 0
@@ -51,9 +53,9 @@ class Stat(fuse.Stat):
         self.st_uid = 0
         self.st_gid = 0
         self.st_size = 0
-        self.st_atime = 0
-        self.st_mtime = 0
-        self.st_ctime = 0
+        self.st_atime = now
+        self.st_mtime = now
+        self.st_ctime = now
 
 
 class DiscordUploaderFile:
@@ -130,6 +132,12 @@ class DiscordUploaderFS(fuse.Fuse):
             return -errno.EINVAL
 
         return 0
+
+    def chmod(self, path, mode):
+        return -errno.EPERM
+
+    def chown(self, path, user, group):
+        return -errno.EPERM
 
     def main(self, *args, **kwrgs):
         self.file_class = DiscordUploaderFile
