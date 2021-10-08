@@ -291,6 +291,13 @@ class Test(unittest.IsolatedAsyncioTestCase):
         await self.assertResp({"type": "DIRECT", "payload": "\n"})
         await self.assert_simple_prompt()
 
+    async def test_dev_discord(self):
+        await self.send(
+            {"type": "INPUT", "payload": "echo hello world > /dev/discord\n"})
+        await self.assertResp(
+            {"type": "UPLOAD", "payload": "aGVsbG8gd29ybGQK"})
+        await self.assert_simple_prompt()
+
 
 if __name__ == "__main__":
     unittest.main()
