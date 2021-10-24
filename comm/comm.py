@@ -515,6 +515,7 @@ class Comm():
                             'type': 'DIRECT',
                             'payload': data.decode(errors='replace'),
                         })
+                        self.last_ptm_flush = time.monotonic()
                     else:
                         data, self.pending_out = (
                             b'', data + self.pending_out)
@@ -543,6 +544,7 @@ class Comm():
                         'type': 'DISPLAY',
                         'payload': display,
                     })
+                    self.last_ptm_flush = time.monotonic()
                 else:
                     flush_wait = True
                 break
@@ -550,7 +552,6 @@ class Comm():
                 self.pending_out = b''
                 break
 
-        self.last_ptm_handle = time.monotonic()
         self.has_flush_wait = flush_wait
 
     async def handle_cmd(self, cmd, payload):
@@ -621,7 +622,7 @@ class Comm():
                 lambda fd: ('cmd', decode_cmd(
                     read_one_pkt(self.cmdsock)))))
 
-        self.last_ptm_handle = time.monotonic()
+        self.last_ptm_flush = time.monotonic()
         self.has_flush_wait = False
         self.next_cmd_ptm = {gen_ptm_task(), gen_cmd_task()}
 
@@ -629,10 +630,14 @@ class Comm():
             if self.has_flush_wait:
                 # Aggregate output, throttle to flush
                 # when 0.5 secs timeout
-                timeout = self.last_ptm_handle + 0.5 - time.monotonic()
+                timeout = self.last_ptm_flush + 0.5 - time.monotonic()
                 timeout = max(0, timeout)
             else:
                 timeout = None
+
+            if timeout is not None and timeout <= 0:
+                await self.handle_ptm(b'', FlushType.HIT_TIMER)
+                continue
 
             done, self.next_cmd_ptm = await asyncio.wait(
                 self.next_cmd_ptm, timeout=timeout,
