@@ -657,6 +657,11 @@ class Comm():
                     return_when=asyncio.FIRST_COMPLETED)
                 done |= done_2nd
 
+            # If we don't have timeout, we have potentially waited long time
+            # start last_ptm_flush from now so the next timeout won't be zero
+            if timeout is None:
+                self.last_ptm_flush = time.monotonic()
+
             done_dict = {}
             for task in done:
                 src, _ = await task
