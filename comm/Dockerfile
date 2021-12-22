@@ -31,7 +31,7 @@ RUN git clone https://github.com/google/nsjail.git /nsjail -b 3.0 --depth 1
 RUN cd /nsjail && make -j$(nproc)
 
 COPY nsjail-hooks.c /
-RUN gcc -shared -o nsjail-hooks.so nsjail-hooks.c -ldl
+RUN gcc -shared -fPIC -o nsjail-hooks.so nsjail-hooks.c -ldl
 
 FROM ubuntu:20.04 as comm
 
