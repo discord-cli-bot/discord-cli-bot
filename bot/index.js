@@ -20,6 +20,8 @@ try {
 	console.warn('No config.private.json found');
 }
 
+const DISCORD_MAX_MESSAGE_LENGTH = 2000;
+
 const rest = new REST({ version: '9' }).setToken(config.token);
 
 const commands = [
@@ -52,12 +54,113 @@ const commands = [
 			}
 		};
 
-		const recvComm = function(obj) {
-			if (obj.type === 'PROMPT' || obj.type === 'DIRECT') {
-				// TODO: Handle \r here
-				channel.send(obj.payload);
+		let prevDirect, prevDirectOff, prevDisplay;
+		const recvComm = async function(obj) {
+			if (obj.type === 'PROMPT') {
+				if (!obj.payload.match(/^\s*$/))
+					channel.send(obj.payload);
+				prevDirect = prevDisplay = null;
+			} else if (obj.type === 'DIRECT') {
+				let newMessage;
+				let payload = obj.payload;
+				const lastCharIsLF = payload.charAt(payload.length - 1) === '\n';
+
+				if (lastCharIsLF)
+					payload = payload.substring(0, payload.length - 1);
+
+				// NOTE: comm guarantees the payload won't have \r\n
+				if (payload.charAt(0) === '\r') {
+					prevDirectOff = 0;
+					while (payload.charAt(0) === '\r')
+						payload = payload.substring(1);
+				}
+
+				if (prevDirect) {
+					let prevPayload = prevDirect.content;
+					let prevLast, editPrev;
+
+					// Split at first line in payload, first line should
+					// go to editing last line of prev message, if possible
+					const firstLF = payload.indexOf('\n');
+					if (firstLF < 0) {
+						editPrev = payload.substring(0);
+						payload = '';
+					} else {
+						editPrev = payload.substring(0, firstLF);
+						payload = payload.substring(firstLF + 1);
+					}
+
+					const prevPayloadLastLF = prevPayload.lastIndexOf('\n');
+					if (prevPayloadLastLF < 0) {
+						prevLast = prevPayload;
+						prevPayload = '';
+					} else {
+						prevLast = prevPayload.substring(prevPayloadLastLF + 1);
+						prevPayload = prevPayload.substring(0, prevPayloadLastLF + 1);
+					}
+
+					let editPrevAgg = '';
+					for (const [index, pseudo] of editPrev.split('\r').entries()) {
+						if (index) {
+							editPrevAgg = pseudo + editPrevAgg.substring(pseudo.length);
+							prevDirectOff = pseudo.length;
+						} else {
+							editPrevAgg = prevLast.substring(0, prevDirectOff) +
+								pseudo +
+								prevLast.substring(prevDirectOff + pseudo.length);
+							prevDirectOff += pseudo.length;
+						}
+					}
+					editPrev = editPrevAgg;
+
+					if (prevPayload.length + editPrev.length < DISCORD_MAX_MESSAGE_LENGTH) {
+						prevPayload += editPrev;
+					} else {
+						// Will overflow prev, add to new message
+						// FIXME: What if this message overflows too?
+						payload = editPrev + '\n' + payload;
+					}
+
+					console.log([prevPayload, prevLast, editPrev, payload]);
+
+					if (prevPayload.match(/^\s*$/)) {
+						await prevDirect.delete();
+						prevDirect = null;
+					} else {
+						prevDirect = await prevDirect.edit(prevPayload);
+					}
+				}
+
+				if (payload.length) {
+					const payloadLines = payload.split('\n');
+					for (const [index, line] of payloadLines.entries()) {
+						let aggline = '';
+						for (const pseudo of line.split('\r')) {
+							aggline = pseudo + aggline.substring(pseudo.length);
+							prevDirectOff = pseudo.length;
+						}
+
+						payloadLines[index] = aggline;
+					}
+
+					payload = payloadLines.join('\n');
+				}
+
+				if (!payload.match(/^\s*$/))
+					newMessage = await channel.send(payload);
+
+				prevDirect = lastCharIsLF ? null : newMessage || prevDirect;
+				prevDisplay = null;
 			} else if (obj.type === 'DISPLAY') {
-				// TODO
+				const payload = '```\n' + obj.payload + '\n```';
+
+				if (prevDisplay)
+					prevDisplay = await prevDisplay.edit(payload);
+				else
+					prevDisplay = await channel.send(payload);
+
+
+				prevDirect = null;
 			}
 		};
 
