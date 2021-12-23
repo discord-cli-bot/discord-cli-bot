@@ -54,14 +54,25 @@ const commands = [
 			}
 		};
 
-		let prevDirect, prevDirectOff, prevDisplay;
+		let sendChatChain = connected;
+
+		let modified = false;
+		let prevDirect, prevDirectContentReal, prevDirectOff;
+		let prevPrompt, prevPromptContentReal, prevDisplay;
 		const recvComm = async function(obj) {
+			let editPrevMessage;
 			if (obj.type === 'PROMPT') {
-				if (!obj.payload.match(/^\s*$/))
-					channel.send(obj.payload);
+				let payload = obj.payload;
+				// escape here: https://stackoverflow.com/a/39543625
+				payload = payload.replace(/(\*|_|`|~|\\|>)/g, '\\$1');
+
+				if (!payload.match(/^\s*$/))
+					prevPrompt = await channel.send(payload);
+				else
+					prevPrompt = null;
+				prevPromptContentReal = payload;
 				prevDirect = prevDisplay = null;
 			} else if (obj.type === 'DIRECT') {
-				let newMessage;
 				let payload = obj.payload;
 				const lastCharIsLF = payload.charAt(payload.length - 1) === '\n';
 
@@ -75,15 +86,20 @@ const commands = [
 						payload = payload.substring(1);
 				}
 
+				// escape here: https://stackoverflow.com/a/39543625
+				payload = payload.replace(/(\*|_|`|~|\\|>)/g, '\\$1');
+
+				let prevDirectOffFirstLine = null;
 				if (prevDirect) {
-					let prevPayload = prevDirect.content;
+					// Can't use prevDirect.content because spacing are trimmed
+					let prevPayload = prevDirectContentReal;
 					let prevLast, editPrev;
 
 					// Split at first line in payload, first line should
 					// go to editing last line of prev message, if possible
 					const firstLF = payload.indexOf('\n');
 					if (firstLF < 0) {
-						editPrev = payload.substring(0);
+						editPrev = payload;
 						payload = '';
 					} else {
 						editPrev = payload.substring(0, firstLF);
@@ -112,23 +128,21 @@ const commands = [
 						}
 					}
 					editPrev = editPrevAgg;
+					prevDirectOffFirstLine = prevDirectOff;
 
-					if (prevPayload.length + editPrev.length < DISCORD_MAX_MESSAGE_LENGTH) {
-						prevPayload += editPrev;
-					} else {
-						// Will overflow prev, add to new message
-						// FIXME: What if this message overflows too?
+					if (firstLF < 0)
+						payload = editPrev;
+					else
 						payload = editPrev + '\n' + payload;
-					}
 
-					console.log([prevPayload, prevLast, editPrev, payload]);
-
-					if (prevPayload.match(/^\s*$/)) {
+					if (!prevPayload.match(/^\s*$/))
+						await prevDirect.edit(prevPayload);
+					else if (modified)
 						await prevDirect.delete();
-						prevDirect = null;
-					} else {
-						prevDirect = await prevDirect.edit(prevPayload);
-					}
+					else
+						editPrevMessage = prevDirect;
+
+					prevDirect = prevDirectContentReal = null;
 				}
 
 				if (payload.length) {
@@ -140,17 +154,49 @@ const commands = [
 							prevDirectOff = pseudo.length;
 						}
 
+						if (!index && prevDirectOffFirstLine !== null)
+							prevDirectOff = prevDirectOffFirstLine;
+
 						payloadLines[index] = aggline;
 					}
 
 					payload = payloadLines.join('\n');
 				}
 
-				if (!payload.match(/^\s*$/))
-					newMessage = await channel.send(payload);
+				let lastMessage, lastMessagePayload;
+				while (payload.length) {
+					if (payload.length > DISCORD_MAX_MESSAGE_LENGTH) {
+						let splitPoint = payload.lastIndexOf('\n', DISCORD_MAX_MESSAGE_LENGTH - 1);
+						if (splitPoint < 0)
+							splitPoint = DISCORD_MAX_MESSAGE_LENGTH;
 
-				prevDirect = lastCharIsLF ? null : newMessage || prevDirect;
-				prevDisplay = null;
+						lastMessagePayload = payload.substring(0, splitPoint);
+						payload = payload.substring(splitPoint);
+					} else {
+						lastMessagePayload = payload;
+						payload = '';
+					}
+
+					if (!editPrevMessage) {
+						if (!lastMessagePayload.match(/^\s*$/))
+							lastMessage = await channel.send(lastMessagePayload);
+						else
+							lastMessage = null;
+					} else {
+						if (!lastMessagePayload.match(/^\s*$/)) {
+							lastMessage = await editPrevMessage.edit(lastMessagePayload);
+						} else {
+							await editPrevMessage.delete();
+							lastMessage = null;
+						}
+
+						editPrevMessage = null;
+					}
+				}
+
+				prevDirect = lastCharIsLF ? null : lastMessage;
+				prevDirectContentReal = lastCharIsLF ? null : lastMessagePayload;
+				prevPrompt = prevDisplay = null;
 			} else if (obj.type === 'DISPLAY') {
 				const payload = '```\n' + obj.payload + '\n```';
 
@@ -159,18 +205,19 @@ const commands = [
 				else
 					prevDisplay = await channel.send(payload);
 
-
-				prevDirect = null;
+				prevPrompt = prevDirect = null;
 			}
+
+			modified = false;
 		};
 
 		// This promise chaining here is needed here because we need to
 		// serialize when a drain is needed.
-		let sendCommPromise = connected;
+		let sendCommChain = connected;
 		const sendComm = function(obj) {
 			const pkt = JSON.stringify(obj);
 
-			sendCommPromise = sendCommPromise.then(async function() {
+			sendCommChain = sendCommChain.then(async function() {
 				if (destroying)
 					return;
 
@@ -181,9 +228,20 @@ const commands = [
 
 		// Exported properties and methods
 		const session = {
-			message: async function(message) {
-				await connected;
-				sendComm({ type: 'INPUT', payload: message + '\n' });
+			_markModified: function() {
+				modified = true;
+			},
+			message: function(message) {
+				sendChatChain = sendChatChain.then(async () => {
+					await connected;
+					sendComm({ type: 'INPUT', payload: message + '\n' });
+
+					if (prevPrompt) {
+						await prevPrompt.delete();
+						prevPrompt = null;
+						await channel.send(prevPromptContentReal + message);
+					}
+				});
 			},
 			killall: function() {
 				destroy();
@@ -206,7 +264,7 @@ const commands = [
 					buf = buf.substring(lineInd + 1);
 
 					const obj = JSON.parse(pkt);
-					recvComm(obj);
+					sendChatChain = sendChatChain.then(async () => recvComm(obj));
 				}
 			});
 
@@ -258,6 +316,8 @@ const commands = [
 		if (message.author.bot)
 			return;
 
+		session._markModified();
+
 		const content = message.cleanContent;
 
 		if (content.charAt(0) === '!')
@@ -274,6 +334,8 @@ const commands = [
 			await interaction.reply('This channel is not handled.');
 			return;
 		}
+
+		session._markModified();
 
 		if (interaction.commandName === 'killall') {
 			await interaction.reply('Destroying and restarting session...');
