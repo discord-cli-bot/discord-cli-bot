@@ -11,7 +11,7 @@ RUN apt-get update && \
                        vim nano emacs \
                        curl wget \
                        iputils-ping iproute2 \
-                       python-is-python3 \
+                       python-is-python3
 
 RUN touch /dev/discord
 
