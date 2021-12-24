@@ -72,6 +72,7 @@ const commands = [
 					prevPrompt = null;
 				prevPromptContentReal = payload;
 				prevDirect = prevDisplay = null;
+				modified = false;
 			} else if (obj.type === 'DIRECT') {
 				let payload = obj.payload;
 				const lastCharIsLF = payload.charAt(payload.length - 1) === '\n';
@@ -197,6 +198,7 @@ const commands = [
 				prevDirect = lastCharIsLF ? null : lastMessage;
 				prevDirectContentReal = lastCharIsLF ? null : lastMessagePayload;
 				prevPrompt = prevDisplay = null;
+				modified = false;
 			} else if (obj.type === 'DISPLAY') {
 				const payload = '```\n' + obj.payload + '\n```';
 
@@ -206,9 +208,18 @@ const commands = [
 					prevDisplay = await channel.send(payload);
 
 				prevPrompt = prevDirect = null;
-			}
+			} else if (obj.type === 'UPLOAD') {
+				const payload = Buffer.from(obj.payload, 'base64');
 
-			modified = false;
+				await channel.send({
+					files: [{
+						attachment: payload,
+						name: 'upload',
+					}],
+				});
+
+				modified = true;
+			}
 		};
 
 		// This promise chaining here is needed here because we need to
