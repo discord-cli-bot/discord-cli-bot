@@ -10,7 +10,13 @@ module.exports = {
 	'rules': {
 		'arrow-spacing': ['warn', { 'before': true, 'after': true }],
 		'brace-style': ['error', '1tbs', { 'allowSingleLine': true }],
-		'comma-dangle': ['error', 'always-multiline'],
+		'comma-dangle': ['error', {
+			'arrays': 'always-multiline',
+			'objects': 'always-multiline',
+			'imports': 'always-multiline',
+			'exports': 'always-multiline',
+			'functions': 'only-multiline',
+		}],
 		'comma-spacing': 'error',
 		'comma-style': 'error',
 		'curly': ['error', 'multi-or-nest', 'consistent'],

@@ -9,7 +9,9 @@ RUN apt-get update && \
                        git libtool pkg-config \
                        htop strace lsof man-db \
                        vim nano emacs \
-                       iputils-ping iproute2
+                       curl wget \
+                       iputils-ping iproute2 \
+                       python-is-python3 \
 
 RUN touch /dev/discord
 

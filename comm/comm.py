@@ -529,15 +529,13 @@ class Comm():
                     break
             elif self.term_state == TermState.IN_EXEC_TERMEMU:
                 if flushtype != FlushType.IF_NECESSARY:
-                    display = 'O' * (self.te_screen.cursor.x + 1)
-                    display += 'X'
-                    display += 'O' * (80 - self.te_screen.cursor.x - 1)
-                    display += '\n'
+                    display = ' ' * (self.te_screen.cursor.x + 1)
+                    display += '|\n'
 
                     for i, line in enumerate(self.te_screen.display):
                         display += (
-                            'X' if self.te_screen.cursor.y == i
-                            else 'O')
+                            '-' if self.te_screen.cursor.y == i
+                            else ' ')
                         display += line.rstrip() + '\n'
 
                     await self.bot_response({
