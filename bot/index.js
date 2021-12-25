@@ -415,6 +415,9 @@ const parseKey = function(key) {
 			_markModified: function() {
 				modified = true;
 			},
+			_isInPrompt: function() {
+				return !!prevPrompt;
+			},
 			input: function(message) {
 				sendChatChain = sendChatChain.then(async () => {
 					await connected;
@@ -529,11 +532,16 @@ const parseKey = function(key) {
 			const parse = parseKey(key);
 
 			if (!parse) {
-				await interaction.reply(`Unknown key: ${discordEscape(key)}`);
+				await interaction.reply(`Unknown key: ${discordEscape(key)}.`);
 				return;
 			}
 
-			await interaction.reply(`Pressing ${discordEscape(parse.canon)}`);
+			if (!session._isInPrompt()) {
+				await interaction.reply('Cannot press arbitrary key while in top-level bash prompt. If you need line-editing, run an inner bash.');
+				return;
+			}
+
+			await interaction.reply(`Pressing ${discordEscape(parse.canon)}...`);
 			session.input(parse.ansi);
 		}
 	});
