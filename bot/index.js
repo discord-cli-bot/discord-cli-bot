@@ -535,7 +535,7 @@ const parseKey = function(key) {
 				return;
 			}
 
-			if (!session._isInPrompt()) {
+			if (session._isInPrompt()) {
 				await interaction.reply('Cannot press arbitrary key while in top-level bash prompt. If you need line-editing, run an inner bash.');
 				return;
 			}
