@@ -207,7 +207,7 @@ const parseKey = function(key) {
 (async function() {
 	discord.login(config.token);
 	await events.once(discord, 'ready');
-	discord.user.setActivity('bash $');
+	setInterval(() => discord.user.setActivity('bash $'), 600 * 1000);
 
 	const sessions = new Map();
 
