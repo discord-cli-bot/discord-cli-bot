@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y build-essential autoconf bison flex \
-                       git libtool pkg-config
+                       git libtool pkg-config libcap-dev
 
 COPY bash /bash
 RUN cd /bash && ./configure --enable-static-link && make -j$(nproc)

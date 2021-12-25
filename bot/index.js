@@ -398,7 +398,6 @@ const parseKey = function(key) {
 		// serialize when a drain is needed.
 		let sendCommChain = connected;
 		const sendComm = function(obj) {
-			console.log(obj);
 			const pkt = JSON.stringify(obj);
 
 			sendCommChain = sendCommChain.then(async function() {
