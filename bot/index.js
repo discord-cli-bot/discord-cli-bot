@@ -34,12 +34,52 @@ const commands = [
 			option.setName('key')
 				.setDescription('The key to press')
 				.setRequired(true)),
+	new SlashCommandBuilder().setName('signal')
+		.setDescription('Send foreground process a signal.')
+		.addStringOption(option =>
+			option.setName('signal')
+				.setDescription('The signal name or number')
+				.setRequired(true)),
 ].map(command => command.toJSON());
 
 const discordEscape = function(message) {
 	// https://stackoverflow.com/a/39543625
 	return message.replace(/(\*|_|`|~|\\|>)/g, '\\$1');
 };
+
+const SIGNALS = [
+	['SIGHUP', 1],
+	['SIGINT', 2],
+	['SIGQUIT', 3],
+	['SIGILL', 4],
+	['SIGTRAP', 5],
+	['SIGABRT', 6],
+	['SIGBUS', 7],
+	['SIGFPE', 8],
+	['SIGKILL', 9],
+	['SIGUSR1', 10],
+	['SIGSEGV', 11],
+	['SIGUSR2', 12],
+	['SIGPIPE', 13],
+	['SIGALRM', 14],
+	['SIGTERM', 15],
+	['SIGSTKFLT', 16],
+	['SIGCHLD', 17],
+	['SIGCONT', 18],
+	['SIGSTOP', 19],
+	['SIGTSTP', 20],
+	['SIGTTIN', 21],
+	['SIGTTOU', 22],
+	['SIGURG', 23],
+	['SIGXCPU', 24],
+	['SIGXFSZ', 25],
+	['SIGVTALRM', 26],
+	['SIGPROF', 27],
+	['SIGWINCH', 28],
+	['SIGIO', 29],
+	['SIGPWR', 30],
+	['SIGSYS', 31],
+];
 
 // ncurses/test $ ./list_keys -tx linux
 const LONGKEYS = [
@@ -234,6 +274,9 @@ const parseKey = function(key) {
 		let prevDirect, prevDirectContentReal, prevDirectOff;
 		let prevPrompt, prevPromptContentReal, prevDisplay;
 		const recvComm = async function(obj) {
+			if (destroying)
+				return;
+
 			let editPrevMessage;
 			if (obj.type === 'PROMPT') {
 				let payload = obj.payload;
@@ -429,6 +472,10 @@ const parseKey = function(key) {
 					}
 				});
 			},
+			signal: async function(signum) {
+				await connected;
+				sendComm({ type: 'SIGNAL', signum: signum });
+			},
 			killall: function() {
 				destroy();
 			},
@@ -486,7 +533,6 @@ const parseKey = function(key) {
 	for (const [guildId, channels] of Object.entries(config.channels)) {
 		await rest.put(
 			Routes.applicationGuildCommands(discord.user.id, guildId),
-			// Routes.applicationCommands(discord.user.id),
 			{ body: commands },
 		);
 
@@ -542,6 +588,37 @@ const parseKey = function(key) {
 
 			await interaction.reply(`Pressing ${discordEscape(parse.canon)}...`);
 			session.input(parse.ansi);
+		} else if (interaction.commandName === 'signal') {
+			const signal = interaction.options.get('signal').value;
+			let signum, signame;
+
+			if (session._isInPrompt()) {
+				await interaction.reply('Cannot send signal to top-level bash prompt.');
+				return;
+			}
+
+			if (signal.match(/^\d+$/)) {
+				signum = parseInt(signal);
+				if (signum > 0 && signum < 32)
+					signame = SIGNALS[signum - 1][0];
+			} else {
+				const signalUpper = signal.toUpperCase();
+				for (const [_signame, _signum] of SIGNALS) {
+					if (_signame === signalUpper) {
+						signame = _signame;
+						signum = _signum;
+						break;
+					}
+				}
+			}
+
+			if (!signame) {
+				await interaction.reply(`Unknown signal: ${discordEscape(signal)}.`);
+				return;
+			}
+
+			await interaction.reply(`Sending ${signame} (signal ${signum})...`);
+			session.signal(signum);
 		}
 	});
 }());
