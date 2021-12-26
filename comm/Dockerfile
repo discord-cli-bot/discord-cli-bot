@@ -20,13 +20,8 @@ FROM ubuntu:20.04 as ubuntu-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y build-essential autoconf bison flex \
-                       git libtool pkg-config libcap-dev
-
-COPY bash /bash
-RUN cd /bash && ./configure --enable-static-link && make -j$(nproc)
-
-RUN apt-get install -y libprotobuf-dev protobuf-compiler \
+    apt-get install -y build-essential flex bison git pkg-config \
+                       libprotobuf-dev protobuf-compiler \
                        libnl-route-3-dev
 
 RUN git clone https://github.com/google/nsjail.git /nsjail -b 3.0 --depth 1
@@ -34,6 +29,15 @@ RUN cd /nsjail && make -j$(nproc)
 
 COPY nsjail-hooks.c /
 RUN gcc -shared -fPIC -o nsjail-hooks.so nsjail-hooks.c -ldl
+
+FROM alpine as alpine-build
+
+RUN apk update && \
+    apk add build-base libcap-static gettext-static
+
+COPY bash /bash
+RUN cd /bash && ./configure --enable-static-link --without-bash-malloc && \
+    make -j$(nproc)
 
 FROM ubuntu:20.04 as comm
 
@@ -53,7 +57,7 @@ RUN /home/user/venv/bin/pip install pyte fuse-python
 RUN mkdir /run/discord-upload-fuse
 
 COPY --from=jail-root / /jailroot
-COPY --from=ubuntu-build /bash/bash /home/user/
+COPY --from=alpine-build /bash/bash /home/user/
 COPY --from=ubuntu-build /nsjail/nsjail /home/user/
 COPY --from=ubuntu-build /nsjail-hooks.so /home/user/
 
