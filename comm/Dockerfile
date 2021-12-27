@@ -55,6 +55,7 @@ RUN python3.9 -m venv /home/user/venv
 RUN /home/user/venv/bin/pip install pyte fuse-python
 
 RUN mkdir /run/discord-upload-fuse
+RUN mkdir /run/container-run
 
 COPY --from=jail-root / /jailroot
 COPY --from=alpine-build /bash/bash /home/user/

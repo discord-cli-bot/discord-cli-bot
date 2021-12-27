@@ -2,9 +2,11 @@
 import asyncio
 import base64
 import contextlib
+import ctypes
 import enum
 import errno
 import fcntl
+import functools
 import itertools
 import json
 import os
@@ -23,6 +25,7 @@ import fuse
 import pyte
 
 DISCORD_UPLOAD_MOUNT = '/run/discord-upload-fuse'
+CONTAINER_RUN = '/run/container-run'
 BOT_TCP_ADDR = '0.0.0.0', 49813
 
 THIS_PID = os.getpid()
@@ -31,6 +34,39 @@ fuse.fuse_python_api = (0, 2)
 
 discord_upload_callbacks_lock = threading.Lock()
 discord_upload_callbacks = {}
+
+lib = ctypes.cdll.LoadLibrary(None)
+
+PyErr_SetFromErrno = ctypes.pythonapi.PyErr_SetFromErrno
+PyErr_SetFromErrno.argtypes = [ctypes.py_object]
+PyErr_SetFromErrno.restype = ctypes.py_object
+
+
+def libc_errno_wrapper(func, errorreturn=-1):
+    @functools.wraps(func)
+    def wrapped(*args):
+        res = func(*args)
+        if res == errorreturn:
+            PyErr_SetFromErrno(OSError)
+            assert False
+
+        return res
+
+    return wrapped
+
+
+mount = lib.mount
+mount.restype = ctypes.c_int
+mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                  ctypes.c_ulong, ctypes.c_char_p]
+mount = libc_errno_wrapper(mount)
+
+umount2 = lib.umount2
+umount2.restype = ctypes.c_int
+umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+umount2 = libc_errno_wrapper(umount2)
+
+MNT_DETACH = 2
 
 
 def path_to_uuid(path):
@@ -801,6 +837,60 @@ class Comm():
             del discord_upload_callbacks[str(self.uuid)]
 
     async def _run(self):
+        idname = None
+        reinit = False
+
+        try:
+            async def read_idname():
+                data = (await self.bot_reader.readline()).strip()
+                if not data:
+                    raise BotClosedException
+
+                data = json.loads(data)
+                assert data['type'] == 'INIT'
+
+                nonlocal idname, reinit
+                idname = data['idname']
+                reinit = data['reinit']
+
+                assert re.match(r'^[a-zA-Z0-9]{1,30}$', idname)
+            await asyncio.wait_for(read_idname(), 1)
+        except Exception:
+            traceback.print_exc()
+            raise BotClosedException
+
+        run = os.path.join(CONTAINER_RUN, idname)
+        run_exists = os.path.exists(run)
+        rootdir = os.path.join(run, 'root')
+
+        if reinit or not run_exists:
+            try:
+                umount2(run.encode(), MNT_DETACH)
+            except OSError:
+                pass
+
+            try:
+                try:
+                    os.mkdir(run)
+                except FileExistsError:
+                    pass
+
+                mount(b'tmpfs', run.encode(), b'tmpfs', 0, None)
+
+                os.mkdir(os.path.join(run, 'upper'))
+                os.mkdir(os.path.join(run, 'work'))
+                os.mkdir(rootdir)
+
+                mount(b'overlay', rootdir.encode(), b'overlay', 0,
+                      f'lowerdir=/jailroot,'
+                      f'upperdir={os.path.join(run, "upper")},'
+                      f'workdir={os.path.join(run, "work")}'.encode())
+            except OSError:
+                umount2(run.encode(), MNT_DETACH)
+                raise
+
+        assert os.path.exists(rootdir)
+
         cmdsockjail = None
         exe_fd = None
 
@@ -828,6 +918,7 @@ class Comm():
                     unset_cloexec(cmdsockjail.fileno(), exe_fd)
                     os.environ['SOCK_FD'] = str(cmdsockjail.fileno())
                     os.environ['EXE_FD'] = str(exe_fd)
+                    os.environ['ROOTDIR'] = rootdir
                     os.environ['DISCORD_UPLOAD_UUID'] = str(self.uuid)
 
                     os.execlp('/home/user/jail.sh', '/home/user/jail.sh')

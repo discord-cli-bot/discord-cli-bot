@@ -28,6 +28,8 @@ const rest = new REST({ version: '9' }).setToken(config.token);
 const commands = [
 	new SlashCommandBuilder().setName('killall')
 		.setDescription('Destroys the current session and restarts it.'),
+	new SlashCommandBuilder().setName('reset')
+		.setDescription('Destroys the current session and reset the filesystem.'),
 	new SlashCommandBuilder().setName('press')
 		.setDescription('Press a key.')
 		.addStringOption(option =>
@@ -253,17 +255,17 @@ const parseKey = function(key) {
 
 	// This is the main session reactor for each channel,
 	// handling channel messages, slash commands, and data from its comm.
-	const handleChannel = function(channel) {
+	const handleChannel = function(channel, reinit) {
 		let comm, connectedResolve;
 		const connected = new Promise((resolve, reject) => {
 			connectedResolve = resolve;
 		});
 
 		let destroying = false;
-		const destroy = function() {
+		const destroy = function(reinitNext) {
 			if (!destroying) {
 				destroying = true;
-				handleChannel(channel);
+				handleChannel(channel, reinitNext);
 				if (comm) comm.destroy();
 			}
 		};
@@ -276,6 +278,8 @@ const parseKey = function(key) {
 		const recvComm = async function(obj) {
 			if (destroying)
 				return;
+
+			reinit = false;
 
 			let editPrevMessage;
 			if (obj.type === 'PROMPT') {
@@ -452,6 +456,11 @@ const parseKey = function(key) {
 			});
 		};
 
+		const sendCommImmediate = async function(obj) {
+			const pkt = JSON.stringify(obj);
+			comm.write(pkt + '\n');
+		};
+
 		// Exported properties and methods
 		const session = {
 			_markModified: function() {
@@ -477,7 +486,10 @@ const parseKey = function(key) {
 				sendComm({ type: 'SIGNAL', signum: signum });
 			},
 			killall: function() {
-				destroy();
+				destroy(reinit);
+			},
+			reset: function() {
+				destroy(true);
 			},
 		};
 
@@ -501,7 +513,7 @@ const parseKey = function(key) {
 				}
 			});
 
-			comm.on('close', () => destroy());
+			comm.on('close', () => destroy(reinit));
 		});
 
 		// Everything ready, now connect.
@@ -523,6 +535,8 @@ const parseKey = function(key) {
 					continue;
 				}
 
+				await sendCommImmediate({ type: 'INIT', idname: channel.id, reinit: reinit });
+
 				console.log(`Channel #${channel.name} ready!`);
 				connectedResolve();
 				break;
@@ -537,7 +551,7 @@ const parseKey = function(key) {
 		);
 
 		for (const channelId of channels)
-			handleChannel(await discord.channels.fetch(channelId));
+			handleChannel(await discord.channels.fetch(channelId), false);
 	}
 
 	discord.on('messageCreate', async message => {
@@ -572,6 +586,9 @@ const parseKey = function(key) {
 		if (interaction.commandName === 'killall') {
 			await interaction.reply('Destroying and restarting session...');
 			session.killall();
+		} else if (interaction.commandName === 'reset') {
+			await interaction.reply('Destroying session and resetting filesystem...');
+			session.reset();
 		} else if (interaction.commandName === 'press') {
 			const key = interaction.options.get('key').value;
 			const parse = parseKey(key);
